@@ -1,57 +1,43 @@
+// app.js
 const express = require('express');
 const mongoose = require('mongoose');
-const loadGloveEmbeddings = require('./gloveHelper');
+const bodyParser = require('body-parser');
+const getTextEmbedding = require('./textembeddings');
+const Student = require('./models/student.models');
+const Candidate = require('./models/candidate.models');
 
 // MongoDB connection URI
-const mongoUri = 'mongodb://localhost:27017/global_search_db';
+const mongoUri = 'mongodb://localhost:27017/Enzigma';
 
 mongoose.connect(mongoUri, { useNewUrlParser: true, useUnifiedTopology: true })
   .then(() => console.log('MongoDB connected'))
   .catch(err => console.log('MongoDB connection error:', err));
 
-// Load GloVe embeddings
-const gloveEmbeddings = loadGloveEmbeddings();
-
-// MongoDB Schema for storing text and embeddings
-const documentSchema = new mongoose.Schema({
-  text: String,
-  embedding: [Number],
-});
-const Document = mongoose.model('Document', documentSchema);
-
-// Express app setup
 const app = express();
-app.use(express.json());
+app.use(bodyParser.json());
 
-// Function to get embedding for a word (or text)
-const getTextEmbedding = (text) => {
-  const words = text.toLowerCase().split(/\s+/);
-  let embedding = Array(50).fill(0); // Initialize an empty embedding
-
-  let wordCount = 0;
-  words.forEach(word => {
-    if (gloveEmbeddings[word]) {
-      embedding = embedding.map((value, index) => value + gloveEmbeddings[word][index]);
-      wordCount++;
-    }
-  });
-
-  // Average the word vectors
-  if (wordCount > 0) {
-    embedding = embedding.map(value => value / wordCount);
-  }
-
-  return embedding;
-};
-
-// Route to add a document and store its embedding
+// Route to add a document (student/candidate) and save its embedding
 app.post('/add-document', async (req, res) => {
-  try {
-    const { text } = req.body;
-    const embedding = getTextEmbedding(text);
+  const { collection, document } = req.body;
+  let embedding;
 
-    const newDocument = new Document({ text, embedding });
-    await newDocument.save();
+  try {
+    embedding = getTextEmbedding(document.Introduction || document.introduction);
+
+    // Save embedding to document and insert into the corresponding collection
+    if (collection === 'students') {
+      const newStudent = new Student({
+        ...document,
+        embeddings: embedding,
+      });
+      await newStudent.save();
+    } else if (collection === 'candidates') {
+      const newCandidate = new Candidate({
+        ...document,
+        embeddings: embedding,
+      });
+      await newCandidate.save();
+    }
 
     res.status(200).send({ message: 'Document added successfully' });
   } catch (error) {
@@ -61,45 +47,24 @@ app.post('/add-document', async (req, res) => {
 
 // Route for global text search
 app.get('/search', async (req, res) => {
+  const query = req.query.q;
+  if (!query) {
+    return res.status(400).send({ error: 'Query parameter "q" is required' });
+  }
+
   try {
-    const query = req.query.query;
-    if (!query) {
-      return res.status(400).send({ error: 'Query parameter is required' });
-    }
+    const studentResults = await Student.find({ $text: { $search: query } });
+    const candidateResults = await Candidate.find({ $text: { $search: query } });
 
-    const queryEmbedding = getTextEmbedding(query);
-    const documents = await Document.find({});
-    
-    let bestMatch = null;
-    let maxSimilarity = -Infinity;
-
-    documents.forEach(doc => {
-      const similarity = cosineSimilarity(queryEmbedding, doc.embedding);
-      if (similarity > maxSimilarity) {
-        maxSimilarity = similarity;
-        bestMatch = doc;
-      }
+    res.status(200).json({
+      studentResults,
+      candidateResults,
     });
-
-    if (bestMatch) {
-      res.status(200).json({ match: bestMatch });
-    } else {
-      res.status(404).send({ message: 'No matching documents found' });
-    }
   } catch (error) {
-    res.status(500).send({ error: error.message });
+    res.status(500).json({ message: 'Error during search', error: error.message });
   }
 });
 
-// Function to compute cosine similarity between two vectors
-const cosineSimilarity = (vecA, vecB) => {
-  const dotProduct = vecA.reduce((sum, value, index) => sum + value * vecB[index], 0);
-  const magnitudeA = Math.sqrt(vecA.reduce((sum, value) => sum + value ** 2, 0));
-  const magnitudeB = Math.sqrt(vecB.reduce((sum, value) => sum + value ** 2, 0));
-  return dotProduct / (magnitudeA * magnitudeB);
-};
-
-// Start the server
 app.listen(3000, () => {
   console.log('Server running on http://localhost:3000');
 });
